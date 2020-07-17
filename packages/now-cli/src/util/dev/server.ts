@@ -518,11 +518,11 @@ export default class DevServer {
     this.getNowConfigPromise = null;
   };
 
-  getNowConfig(): Promise<NowConfig> {
+  getNowConfig(client?: Client, project?: Project): Promise<NowConfig> {
     if (this.getNowConfigPromise) {
       return this.getNowConfigPromise;
     }
-    this.getNowConfigPromise = this._getNowConfig();
+    this.getNowConfigPromise = this._getNowConfig(client, project);
 
     // Clean up the promise once it has resolved
     const clear = this.clearNowConfigPromise;
@@ -531,7 +531,7 @@ export default class DevServer {
     return this.getNowConfigPromise;
   }
 
-  async _getNowConfig(): Promise<NowConfig> {
+  async _getNowConfig(client?: Client, project?: Project): Promise<NowConfig> {
     const configPath = getNowConfigPath(this.cwd);
 
     const [
@@ -796,7 +796,7 @@ export default class DevServer {
     const { ig } = await getVercelIgnore(this.cwd);
     this.filter = ig.createFilter();
 
-    const nowConfig = await this.getNowConfig();
+    const nowConfig = await this.getNowConfig(client, project);
 
     const opts = { output: this.output, isBuilds: true };
     const files = await getFiles(this.cwd, nowConfig, opts);
