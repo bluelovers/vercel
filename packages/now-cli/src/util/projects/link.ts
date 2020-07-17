@@ -15,6 +15,7 @@ import { prependEmoji, emoji } from '../emoji';
 import AJV from 'ajv';
 import { isDirectory } from '../config/global-path';
 import { NowBuildError, getPlatformEnv } from '@vercel/build-utils';
+import outputCode from '../output/code';
 
 const readFile = promisify(fs.readFile);
 const writeFile = promisify(fs.writeFile);
@@ -73,7 +74,7 @@ async function getLinkFromDir(dir: string): Promise<ProjectLink | null> {
 
     if (!ajv.validate(linkSchema, link)) {
       throw new Error(
-        `Project settings are invalid. To link your project again, remove the ${dir} directory.`
+        `Project Settings are invalid. To link your project again, remove the ${dir} directory.`
       );
     }
 
@@ -87,7 +88,7 @@ async function getLinkFromDir(dir: string): Promise<ProjectLink | null> {
     // link file can't be read
     if (error.name === 'SyntaxError') {
       throw new Error(
-        `Project settings could not be retrieved. To link your project again, remove the ${dir} directory.`
+        `Project Settings could not be retrieved. To link your project again, remove the ${dir} directory.`
       );
     }
 
@@ -141,13 +142,27 @@ export async function getLinkedProject(
   }
 
   const spinner = output.spinner('Retrieving project…', 1000);
-  let org: Org | null;
-  let project: Project | ProjectNotFound | null;
+  let org: Org | null = null;
+  let project: Project | ProjectNotFound | null = null;
   try {
     [org, project] = await Promise.all([
       getOrgById(client, link.orgId),
       getProjectByIdOrName(client, link.projectId, link.orgId),
     ]);
+  } catch (err) {
+    if (err?.status === 403) {
+      spinner();
+      throw new NowBuildError({
+        message: `Could not retrieve Project Settings. To link your Project, remove the ${outputCode(
+          '.vercel'
+        )} directory and deploy again.`,
+        code: 'PROJECT_UNAUTHORIZED',
+        link: 'https://vercel.link/cannot-load-project-settings',
+      });
+    }
+
+    // Not a special case 403, we should still throw it
+    throw err;
   } finally {
     spinner();
   }

@@ -15,18 +15,18 @@ const {
 } = buildUtils;
 
 import {
-  Lambda,
   BuildOptions,
   Config,
   FileBlob,
   FileFsRef,
   Files,
+  Lambda,
+  NowBuildError,
   PackageJson,
   PrepareCacheOptions,
   Prerender,
-  NowBuildError,
 } from '@vercel/build-utils';
-import { Route, Handler } from '@vercel/routing-utils';
+import { Handler, Route } from '@vercel/routing-utils';
 import {
   convertHeaders,
   convertRedirects,
@@ -34,6 +34,7 @@ import {
 } from '@vercel/routing-utils/dist/superstatic';
 import nodeFileTrace, { NodeFileTraceReasons } from '@zeit/node-file-trace';
 import { ChildProcess, fork } from 'child_process';
+import escapeStringRegexp from 'escape-string-regexp';
 import {
   lstat,
   pathExists,
@@ -46,7 +47,6 @@ import path from 'path';
 import resolveFrom from 'resolve-from';
 import semver from 'semver';
 import createServerlessConfig from './create-serverless-config';
-import escapeStringRegexp from 'escape-string-regexp';
 import nextLegacyVersions from './legacy-versions';
 import {
   createLambdaFromPseudoLayers,
@@ -91,7 +91,7 @@ export const version = 2;
 const htmlContentType = 'text/html; charset=utf-8';
 const nowDevChildProcesses = new Set<ChildProcess>();
 
-['SIGINT', 'SIGTERM'].forEach((signal) => {
+['SIGINT', 'SIGTERM'].forEach(signal => {
   process.once(signal as NodeJS.Signals, () => {
     for (const child of nowDevChildProcesses) {
       debug(
@@ -108,7 +108,13 @@ const MAX_AGE_ONE_YEAR = 31536000;
 /**
  * Read package.json from files
  */
-async function readPackageJson(entryPath: string) {
+async function readPackageJson(
+  entryPath: string
+): Promise<{
+  scripts?: { [key: string]: string };
+  dependencies?: { [key: string]: string };
+  devDependencies?: { [key: string]: string };
+}> {
   const packagePath = path.join(entryPath, 'package.json');
 
   try {
@@ -139,15 +145,38 @@ async function writeNpmRc(workPath: string, token: string) {
   );
 }
 
-function getNextVersion(packageJson: {
-  dependencies?: { [key: string]: string };
-  devDependencies?: { [key: string]: string };
-}) {
-  let nextVersion;
-  if (packageJson.dependencies && packageJson.dependencies.next) {
-    nextVersion = packageJson.dependencies.next;
-  } else if (packageJson.devDependencies && packageJson.devDependencies.next) {
-    nextVersion = packageJson.devDependencies.next;
+/**
+ * Get the installed Next version.
+ */
+function getRealNextVersion(entryPath: string): string | false {
+  try {
+    // First try to resolve the `next` dependency and get the real version from its
+    // package.json. This allows the builder to be used with frameworks like Blitz that
+    // bundle Next but where Next isn't in the project root's package.json
+    const nextVersion: string = require(resolveFrom(
+      entryPath,
+      'next/package.json'
+    )).version;
+    debug(`Detected Next.js version: ${nextVersion}`);
+    return nextVersion;
+  } catch (_ignored) {
+    debug(
+      `Could not identify real Next.js version, ensure it is defined as a project dependency.`
+    );
+    return false;
+  }
+}
+
+/**
+ * Get the package.json Next version.
+ */
+async function getNextVersionRange(entryPath: string): Promise<string | false> {
+  let nextVersion: string | false = false;
+  const pkg = await readPackageJson(entryPath);
+  if (pkg.dependencies && pkg.dependencies.next) {
+    nextVersion = pkg.dependencies.next;
+  } else if (pkg.devDependencies && pkg.devDependencies.next) {
+    nextVersion = pkg.devDependencies.next;
   }
   return nextVersion;
 }
@@ -218,18 +247,9 @@ export const build = async ({
   await download(files, workPath, meta);
 
   const pkg = await readPackageJson(entryPath);
-  const nextVersion = getNextVersion(pkg);
-
+  const nextVersionRange = await getNextVersionRange(entryPath);
   const nodeVersion = await getNodeVersion(entryPath, undefined, config, meta);
   const spawnOpts = getSpawnOptions(meta, nodeVersion);
-
-  if (!nextVersion) {
-    throw new NowBuildError({
-      code: 'NEXT_NO_VERSION',
-      message:
-        'No Next.js version could be detected in "package.json". Make sure `"next"` is installed in "dependencies" or "devDependencies"',
-    });
-  }
 
   const nowJsonPath = await findUp(['now.json', 'vercel.json'], {
     cwd: path.join(workPath, path.dirname(entrypoint)),
@@ -308,7 +328,7 @@ export const build = async ({
     console.warn('WARNING: You should not upload the `.next` directory.');
   }
 
-  const isLegacy = isLegacyNext(nextVersion);
+  const isLegacy = nextVersionRange && isLegacyNext(nextVersionRange);
   let shouldRunScript = 'now-build';
 
   debug(`MODE: ${isLegacy ? 'legacy' : 'serverless'}`);
@@ -362,18 +382,20 @@ export const build = async ({
   console.log('Installing dependencies...');
   await runNpmInstall(entryPath, ['--prefer-offline'], spawnOpts, meta);
 
-  let realNextVersion: string | undefined;
-  try {
-    realNextVersion = require(resolveFrom(entryPath, 'next/package.json'))
-      .version;
-
-    debug(`Detected Next.js version: ${realNextVersion}`);
-  } catch (_ignored) {
-    debug(`Could not identify real Next.js version, that's OK!`);
+  // Refetch Next version now that dependencies are installed.
+  // This will now resolve the actual installed Next version,
+  // even if Next isn't in the project package.json
+  const nextVersion = getRealNextVersion(entryPath);
+  if (!nextVersion) {
+    throw new NowBuildError({
+      code: 'NEXT_NO_VERSION',
+      message:
+        'No Next.js version could be detected in your project. Make sure `"next"` is installed in "dependencies" or "devDependencies"',
+    });
   }
 
   if (!isLegacy) {
-    await createServerlessConfig(workPath, entryPath, realNextVersion);
+    await createServerlessConfig(workPath, entryPath, nextVersion);
   }
 
   debug('Running user script...');
@@ -410,7 +432,7 @@ export const build = async ({
   const routesManifest = await getRoutesManifest(
     entryPath,
     outputDirectory,
-    realNextVersion
+    nextVersion
   );
   const prerenderManifest = await getPrerenderManifest(entryPath);
   const headers: Route[] = [];
@@ -463,7 +485,7 @@ export const build = async ({
                 `${(ssgDataRoute && ssgDataRoute.dataRoute) || dataRoute.page}${
                   dataRoute.routeKeys
                     ? `?${Object.keys(dataRoute.routeKeys)
-                        .map((key) => `${dataRoute.routeKeys![key]}=$${key}`)
+                        .map(key => `${dataRoute.routeKeys![key]}=$${key}`)
                         .join('&')}`
                     : ''
                 }`
@@ -694,7 +716,7 @@ export const build = async ({
     );
     const nodeModules = excludeFiles(
       await glob('node_modules/**', entryPath),
-      (file) => file.startsWith('node_modules/.cache')
+      file => file.startsWith('node_modules/.cache')
     );
     const launcherFiles = {
       'now__bridge.js': new FileFsRef({
@@ -723,7 +745,7 @@ export const build = async ({
     const launcherData = await readFile(launcherPath, 'utf8');
 
     await Promise.all(
-      Object.keys(pages).map(async (page) => {
+      Object.keys(pages).map(async page => {
         // These default pages don't have to be handled as they'd always 404
         if (['_app.js', '_error.js', '_document.js'].includes(page)) {
           return;
@@ -839,10 +861,7 @@ export const build = async ({
     // Assume tracing to be safe, bail if we know we don't need it.
     let requiresTracing = hasLambdas;
     try {
-      if (
-        realNextVersion &&
-        semver.lt(realNextVersion, ExperimentalTraceVersion)
-      ) {
+      if (nextVersion && semver.lt(nextVersion, ExperimentalTraceVersion)) {
         debug(
           'Next.js version is too old for us to trace the required dependencies.\n' +
             'Assuming Next.js has handled it!'
@@ -884,7 +903,7 @@ export const build = async ({
 
       const apiPages: string[] = [];
       const nonApiPages: string[] = [];
-      const allPagePaths = Object.keys(pages).map((page) => pages[page].fsPath);
+      const allPagePaths = Object.keys(pages).map(page => pages[page].fsPath);
 
       for (const page of allPagePaths) {
         if (isApiPage(page)) {
@@ -977,7 +996,7 @@ export const build = async ({
         debug(
           'detected (legacy) assets to be bundled with serverless function:'
         );
-        assetKeys.forEach((assetFile) => debug(`\t${assetFile}`));
+        assetKeys.forEach(assetFile => debug(`\t${assetFile}`));
         debug(
           '\nPlease upgrade to Next.js 9.1 to leverage modern asset handling.'
         );
@@ -1117,7 +1136,7 @@ export const build = async ({
       }
     } else {
       await Promise.all(
-        pageKeys.map(async (page) => {
+        pageKeys.map(async page => {
           // These default pages don't have to be handled as they'd always 404
           if (['_app.js', '_document.js'].includes(page)) {
             return;
@@ -1198,8 +1217,8 @@ export const build = async ({
       false,
       routesManifest,
       new Set(prerenderManifest.omittedRoutes)
-    ).then((arr) =>
-      arr.map((route) => {
+    ).then(arr =>
+      arr.map(route => {
         route.src = route.src.replace('^', `^${dynamicPrefix}`);
         return route;
       })
@@ -1208,6 +1227,21 @@ export const build = async ({
     if (isSharedLambdas) {
       const launcherPath = path.join(__dirname, 'templated-launcher-shared.js');
       const launcherData = await readFile(launcherPath, 'utf8');
+
+      // we need to include the prerenderManifest.omittedRoutes here
+      // for the page to be able to be matched in the lambda for preview mode
+      const completeDynamicRoutes = await getDynamicRoutes(
+        entryPath,
+        entryDirectory,
+        dynamicPages,
+        false,
+        routesManifest
+      ).then(arr =>
+        arr.map(route => {
+          route.src = route.src.replace('^', `^${dynamicPrefix}`);
+          return route;
+        })
+      );
 
       await Promise.all(
         [...apiLambdaGroups, ...pageLambdaGroups].map(
@@ -1223,7 +1257,7 @@ export const build = async ({
                   const pages = {
                     ${groupPageKeys
                       .map(
-                        (page) =>
+                        page =>
                           `'${page}': require('./${path.join(
                             './',
                             group.pages[page].pageFileName
@@ -1268,7 +1302,7 @@ export const build = async ({
                       // for prerendered dynamic routes (/blog/post-1) we need to
                       // find the match since it won't match the page directly
                       const dynamicRoutes = ${JSON.stringify(
-                        dynamicRoutes.map((route) => ({
+                        completeDynamicRoutes.map(route => ({
                           src: route.src,
                           dest: route.dest,
                         }))
@@ -1482,13 +1516,13 @@ export const build = async ({
       }
     };
 
-    Object.keys(prerenderManifest.staticRoutes).forEach((route) =>
+    Object.keys(prerenderManifest.staticRoutes).forEach(route =>
       onPrerenderRoute(route, { isBlocking: false, isFallback: false })
     );
-    Object.keys(prerenderManifest.fallbackRoutes).forEach((route) =>
+    Object.keys(prerenderManifest.fallbackRoutes).forEach(route =>
       onPrerenderRoute(route, { isBlocking: false, isFallback: true })
     );
-    Object.keys(prerenderManifest.legacyBlockingRoutes).forEach((route) =>
+    Object.keys(prerenderManifest.legacyBlockingRoutes).forEach(route =>
       onPrerenderRoute(route, { isBlocking: true, isFallback: false })
     );
 
@@ -1542,7 +1576,7 @@ export const build = async ({
       ...mappedFiles,
       [path.join(
         entryDirectory,
-        file.replace(/public[/\\]+/, '')
+        file.replace(/^public[/\\]+/, '')
       )]: publicFolderFiles[file],
     }),
     {}
@@ -1552,7 +1586,7 @@ export const build = async ({
     // We need to delete lambdas from output instead of omitting them from the
     // start since we rely on them for powering Preview Mode (read above in
     // onPrerenderRoute).
-    prerenderManifest.omittedRoutes.forEach((routeKey) => {
+    prerenderManifest.omittedRoutes.forEach(routeKey => {
       // Get the route file as it'd be mounted in the builder output
       const routeFileNoExt = path.posix.join(
         entryDirectory,
@@ -1760,14 +1794,8 @@ export const prepareCache = async ({
   const entryPath = path.join(workPath, entryDirectory);
   const outputDirectory = config.outputDirectory || '.next';
 
-  const pkg = await readPackageJson(entryPath);
-  const nextVersion = getNextVersion(pkg);
-  if (!nextVersion)
-    throw new NowBuildError({
-      code: 'NEXT_VERSION_PARSE_FAILED',
-      message: 'Could not parse Next.js version',
-    });
-  const isLegacy = isLegacyNext(nextVersion);
+  const nextVersionRange = await getNextVersionRange(entryPath);
+  const isLegacy = nextVersionRange && isLegacyNext(nextVersionRange);
 
   if (isLegacy) {
     // skip caching legacy mode (swapping deps between all and production can get bug-prone)
