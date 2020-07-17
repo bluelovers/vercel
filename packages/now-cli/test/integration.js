@@ -611,6 +611,8 @@ test('Deploy `api-env` fixture and test `vercel env` command', async t => {
       return false;
     });
 
+    const localhostNoProtocol = localhost.slice('http://'.length);
+
     const apiUrl = `${localhost[0]}/api/get-env`;
     const apiRes = await fetch(apiUrl);
 
@@ -619,13 +621,13 @@ test('Deploy `api-env` fixture and test `vercel env` command', async t => {
     const apiJson = await apiRes.json();
 
     t.is(apiJson['MY_ENV_VAR'], 'MY_VALUE');
-    t.is(apiJson['VERCEL_URL'], '');
+    t.is(apiJson['VERCEL_URL'], localhostNoProtocol);
 
     const homeUrl = localhost[0];
     const homeRes = await fetch(homeUrl);
     const homeJson = await homeRes.json();
     t.is(homeJson['MY_ENV_VAR'], 'MY_VALUE');
-    t.is(homeJson['VERCEL_URL'], '');
+    t.is(homeJson['VERCEL_URL'], localhostNoProtocol);
 
     vc.kill('SIGTERM', { forceKillAfterTimeout: 2000 });
 

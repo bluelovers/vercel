@@ -63,7 +63,7 @@ export default async function dev(
     if (project.devCommand) {
       devCommand = project.devCommand;
     } else if (project.framework) {
-      const framework = frameworks.find((f) => f.slug === project.framework);
+      const framework = frameworks.find(f => f.slug === project.framework);
 
       if (framework) {
         if (framework.slug) {
